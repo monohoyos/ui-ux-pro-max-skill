@@ -1,10 +1,17 @@
-import { readFile, mkdir, writeFile, cp, access, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { readFile, mkdir, writeFile, cp, access, readdir, lstat, rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// After bun build: dist/index.js -> ../assets = cli/assets ✓
-const ASSETS_DIR = join(__dirname, '..', 'assets');
+const ASSETS_CANDIDATES = [
+  // Bun bundle: dist/index.js
+  join(__dirname, '..', 'assets'),
+  // TypeScript fallback: dist/utils/template.js
+  join(__dirname, '..', '..', 'assets'),
+];
+const ASSETS_DIR = ASSETS_CANDIDATES.find(path => existsSync(path)) ?? ASSETS_CANDIDATES[0];
 
 export interface PlatformConfig {
   platform: string;
@@ -42,6 +49,10 @@ const AI_TO_PLATFORM: Record<string, string> = {
   continue: 'continue',
   codebuddy: 'codebuddy',
   droid: 'droid',
+  kilocode: 'kilocode',
+  warp: 'warp',
+  augment: 'augment',
+  codewhale: 'codewhale',
 };
 
 async function exists(path: string): Promise<boolean> {
@@ -114,8 +125,9 @@ function renderFrontmatter(frontmatter: Record<string, string> | null): string {
 
 /**
  * Render skill file content from template
+ * When isGlobal=true, rewrites script paths to use ~/{root}/ prefix
  */
-export async function renderSkillFile(config: PlatformConfig): Promise<string> {
+export async function renderSkillFile(config: PlatformConfig, isGlobal = false): Promise<string> {
   // Load base template
   let content = await loadTemplate('base/skill-content.md');
 
@@ -139,7 +151,33 @@ export async function renderSkillFile(config: PlatformConfig): Promise<string> {
     .replace(/\{\{SKILL_OR_WORKFLOW\}\}/g, config.skillOrWorkflow)
     .replace(/\{\{QUICK_REFERENCE\}\}/g, quickRefWithNewline);
 
+  // For global install, rewrite relative script paths to absolute ~/root/ paths
+  if (isGlobal) {
+    const globalPrefix = `~/${config.folderStructure.root}/`;
+    content = content.replace(
+      /python3 skills\//g,
+      `python3 ${globalPrefix}skills/`
+    );
+  }
+
   return frontmatter + content;
+}
+
+/**
+ * Replace a pre-existing non-directory at `path` so a real directory can be
+ * created there. Older CLI installs (and Windows checkouts of the repo's
+ * symlinked data/scripts) can leave plain "pointer" files at these paths;
+ * mkdir then throws EEXIST and the install silently leaves stale files.
+ */
+async function ensureCleanDir(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isDirectory()) {
+      await rm(path, { recursive: true, force: true });
+    }
+  } catch {
+    // Nothing exists at the path yet — mkdir will create it.
+  }
 }
 
 /**
@@ -154,31 +192,66 @@ async function copyDataAndScripts(targetSkillDir: string): Promise<void> {
 
   // Copy data
   if (await exists(dataSource)) {
+    await ensureCleanDir(dataTarget);
     await mkdir(dataTarget, { recursive: true });
     await cp(dataSource, dataTarget, { recursive: true });
   }
 
   // Copy scripts
   if (await exists(scriptsSource)) {
+    await ensureCleanDir(scriptsTarget);
     await mkdir(scriptsTarget, { recursive: true });
     await cp(scriptsSource, scriptsTarget, { recursive: true });
   }
 }
 
 /**
+ * List the static sub-skills bundled under assets/skills/ (everything except
+ * the template-rendered orchestrator). Empty if the package predates bundling.
+ */
+export async function listBundledSubSkills(): Promise<string[]> {
+  const skillsSource = join(ASSETS_DIR, 'skills');
+  if (!(await exists(skillsSource))) return [];
+  const entries = await readdir(skillsSource, { withFileTypes: true });
+  return entries.filter(e => e.isDirectory()).map(e => e.name).sort();
+}
+
+/**
+ * Install the bundled sub-skills as siblings of the orchestrator skill, so a
+ * single `uipro init` delivers all 7 skills instead of only ui-ux-pro-max.
+ */
+async function copySubSkills(skillsParentDir: string, force: boolean): Promise<void> {
+  const skillsSource = join(ASSETS_DIR, 'skills');
+  if (!(await exists(skillsSource))) return;
+
+  for (const name of await listBundledSubSkills()) {
+    const target = join(skillsParentDir, name);
+    if (await exists(target) && !force) continue;
+    await mkdir(target, { recursive: true });
+    await cp(join(skillsSource, name), target, { recursive: true });
+  }
+}
+
+/**
  * Generate platform files for a specific AI type
  * All platforms use self-contained installation with data and scripts
+ * When isGlobal=true, installs to ~/home directory with absolute script paths
  */
 export async function generatePlatformFiles(
   targetDir: string,
-  aiType: string
+  aiType: string,
+  isGlobal = false,
+  force = false
 ): Promise<string[]> {
   const config = await loadPlatformConfig(aiType);
   const createdFolders: string[] = [];
 
+  // For global install, target the user's home directory
+  const effectiveDir = isGlobal ? homedir() : targetDir;
+
   // Determine full skill directory path
   const skillDir = join(
-    targetDir,
+    effectiveDir,
     config.folderStructure.root,
     config.folderStructure.skillPath
   );
@@ -186,14 +259,32 @@ export async function generatePlatformFiles(
   // Create directory structure
   await mkdir(skillDir, { recursive: true });
 
-  // Render and write skill file
-  const skillContent = await renderSkillFile(config);
+  // Render and write skill file (pass isGlobal to adjust paths)
+  const skillContent = await renderSkillFile(config, isGlobal);
   const skillFilePath = join(skillDir, config.folderStructure.filename);
+
+  const fileAlreadyExists = await exists(skillFilePath);
+  if (fileAlreadyExists && !force) {
+    console.log(`  Skipped (already exists): ${skillFilePath} — use --force to overwrite`);
+    return [];
+  }
+
   await writeFile(skillFilePath, skillContent, 'utf-8');
   createdFolders.push(config.folderStructure.root);
 
   // Copy data and scripts into the skill directory (self-contained)
   await copyDataAndScripts(skillDir);
+
+  // Install the sibling sub-skills (banner-design, brand, design, ...) next to
+  // the orchestrator so all 7 skills are delivered. The skills parent is the
+  // orchestrator's parent dir (skills/ for most platforms, prompts/ for
+  // copilot, steering/ for kiro) — derived, not hardcoded.
+  const skillsParentDir = join(
+    effectiveDir,
+    config.folderStructure.root,
+    dirname(config.folderStructure.skillPath)
+  );
+  await copySubSkills(skillsParentDir, force);
 
   return createdFolders;
 }
@@ -201,12 +292,12 @@ export async function generatePlatformFiles(
 /**
  * Generate files for all AI types
  */
-export async function generateAllPlatformFiles(targetDir: string): Promise<string[]> {
+export async function generateAllPlatformFiles(targetDir: string, isGlobal = false, force = false): Promise<string[]> {
   const allFolders = new Set<string>();
 
   for (const aiType of Object.keys(AI_TO_PLATFORM)) {
     try {
-      const folders = await generatePlatformFiles(targetDir, aiType);
+      const folders = await generatePlatformFiles(targetDir, aiType, isGlobal, force);
       folders.forEach(f => allFolders.add(f));
     } catch {
       // Skip if generation fails for a platform

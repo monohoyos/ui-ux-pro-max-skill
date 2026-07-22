@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AIType } from '../types/index.js';
+import type { AIType, ConcreteAIType } from '../types/index.js';
 
 interface DetectionResult {
-  detected: AIType[];
+  detected: ConcreteAIType[];
   suggested: AIType | null;
 }
 
 export function detectAIType(cwd: string = process.cwd()): DetectionResult {
-  const detected: AIType[] = [];
+  const detected: ConcreteAIType[] = [];
 
   if (existsSync(join(cwd, '.claude'))) {
     detected.push('claude');
@@ -19,7 +19,7 @@ export function detectAIType(cwd: string = process.cwd()): DetectionResult {
   if (existsSync(join(cwd, '.windsurf'))) {
     detected.push('windsurf');
   }
-  if (existsSync(join(cwd, '.agent'))) {
+  if (existsSync(join(cwd, '.agents')) || existsSync(join(cwd, '.agent'))) {
     detected.push('antigravity');
   }
   if (existsSync(join(cwd, '.github'))) {
@@ -55,6 +55,18 @@ export function detectAIType(cwd: string = process.cwd()): DetectionResult {
   if (existsSync(join(cwd, '.factory'))) {
     detected.push('droid');
   }
+  if (existsSync(join(cwd, '.kilocode'))) {
+    detected.push('kilocode');
+  }
+  if (existsSync(join(cwd, '.warp'))) {
+    detected.push('warp');
+  }
+  if (existsSync(join(cwd, '.augment'))) {
+    detected.push('augment');
+  }
+  if (existsSync(join(cwd, '.codewhale'))) {
+    detected.push('codewhale');
+  }
 
   // Suggest based on what's detected
   let suggested: AIType | null = null;
@@ -76,7 +88,7 @@ export function getAITypeDescription(aiType: AIType): string {
     case 'windsurf':
       return 'Windsurf (.windsurf/skills/)';
     case 'antigravity':
-      return 'Antigravity (.agent/skills/)';
+      return 'Antigravity (.agents/skills/)';
     case 'copilot':
       return 'GitHub Copilot (.github/prompts/)';
     case 'kiro':
@@ -99,6 +111,14 @@ export function getAITypeDescription(aiType: AIType): string {
       return 'CodeBuddy (.codebuddy/skills/)';
     case 'droid':
       return 'Droid (Factory) (.factory/skills/)';
+    case 'kilocode':
+      return 'KiloCode (.kilocode/skills/)';
+    case 'warp':
+      return 'Warp (.warp/skills/)';
+    case 'augment':
+      return 'Augment (.augment/skills/)';
+    case 'codewhale':
+      return 'CodeWhale (.codewhale/skills/)';
     case 'all':
       return 'All AI assistants';
   }

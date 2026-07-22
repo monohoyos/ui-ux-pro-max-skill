@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
@@ -13,19 +14,27 @@ import {
   getLatestRelease,
   getAssetUrl,
   downloadRelease,
+  getGitHubTokenGuidance,
   GitHubRateLimitError,
   GitHubDownloadError,
 } from '../utils/github.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// From dist/index.js -> ../assets (one level up to cli/, then assets/)
-const ASSETS_DIR = join(__dirname, '..', 'assets');
+const ASSETS_CANDIDATES = [
+  // Bun bundle: dist/index.js
+  join(__dirname, '..', 'assets'),
+  // TypeScript fallback: dist/commands/init.js
+  join(__dirname, '..', '..', 'assets'),
+];
+const ASSETS_DIR = ASSETS_CANDIDATES.find(path => existsSync(path)) ?? ASSETS_CANDIDATES[0];
 
 interface InitOptions {
   ai?: AIType;
   force?: boolean;
   offline?: boolean;
   legacy?: boolean; // Use old ZIP-based install
+  global?: boolean; // Install to home directory (global mode)
+  token?: string; // GitHub PAT for higher API rate limits
 }
 
 /**
@@ -35,13 +44,14 @@ interface InitOptions {
 async function tryGitHubInstall(
   targetDir: string,
   aiType: AIType,
-  spinner: ReturnType<typeof ora>
+  spinner: ReturnType<typeof ora>,
+  token?: string
 ): Promise<string[] | null> {
   let tempDir: string | null = null;
 
   try {
     spinner.text = 'Fetching latest release from GitHub...';
-    const release = await getLatestRelease();
+    const release = await getLatestRelease(token);
     const assetUrl = getAssetUrl(release);
 
     if (!assetUrl) {
@@ -52,7 +62,7 @@ async function tryGitHubInstall(
     tempDir = await createTempDir();
     const zipPath = join(tempDir, 'release.zip');
 
-    await downloadRelease(assetUrl, zipPath);
+    await downloadRelease(assetUrl, zipPath, token);
 
     spinner.text = 'Extracting and installing files...';
     const { copiedFolders, tempDir: extractedTempDir } = await installFromZip(
@@ -72,7 +82,7 @@ async function tryGitHubInstall(
     }
 
     if (error instanceof GitHubRateLimitError) {
-      spinner.warn('GitHub rate limit reached, using template generation...');
+      spinner.warn(`GitHub rate limit reached, falling back to bundled assets.\n${getGitHubTokenGuidance()}`);
       return null;
     }
 
@@ -99,15 +109,19 @@ async function tryGitHubInstall(
 async function templateInstall(
   targetDir: string,
   aiType: AIType,
-  spinner: ReturnType<typeof ora>
+  spinner: ReturnType<typeof ora>,
+  isGlobal = false,
+  force = false
 ): Promise<string[]> {
-  spinner.text = 'Generating skill files from templates...';
+  spinner.text = isGlobal
+    ? 'Generating skill files globally...'
+    : 'Generating skill files from templates...';
 
   if (aiType === 'all') {
-    return generateAllPlatformFiles(targetDir);
+    return generateAllPlatformFiles(targetDir, isGlobal, force);
   }
 
-  return generatePlatformFiles(targetDir, aiType);
+  return generatePlatformFiles(targetDir, aiType, isGlobal, force);
 }
 
 export async function initCommand(options: InitOptions): Promise<void> {
@@ -142,7 +156,9 @@ export async function initCommand(options: InitOptions): Promise<void> {
     aiType = response.aiType as AIType;
   }
 
-  logger.info(`Installing for: ${chalk.cyan(getAITypeDescription(aiType))}`);
+  const isGlobal = !!options.global;
+  const modeLabel = isGlobal ? ' (global)' : '';
+  logger.info(`Installing for: ${chalk.cyan(getAITypeDescription(aiType))}${modeLabel}`);
 
   const spinner = ora('Installing files...').start();
   const cwd = process.cwd();
@@ -152,9 +168,12 @@ export async function initCommand(options: InitOptions): Promise<void> {
   try {
     // Use legacy ZIP-based install if --legacy flag is set
     if (options.legacy) {
+      if (isGlobal) {
+        spinner.warn('--global is not supported with --legacy mode, installing locally instead');
+      }
       // Try GitHub download first (unless offline mode)
       if (!options.offline) {
-        const githubResult = await tryGitHubInstall(cwd, aiType, spinner);
+        const githubResult = await tryGitHubInstall(cwd, aiType, spinner, options.token);
         if (githubResult) {
           copiedFolders = githubResult;
           installMethod = 'github';
@@ -169,7 +188,7 @@ export async function initCommand(options: InitOptions): Promise<void> {
       }
     } else {
       // Use new template-based generation (default)
-      copiedFolders = await templateInstall(cwd, aiType, spinner);
+      copiedFolders = await templateInstall(cwd, aiType, spinner, isGlobal, options.force);
       installMethod = 'template';
     }
 

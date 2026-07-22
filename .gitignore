@@ -52,3 +52,6 @@ out/
 .claude/session-state/
 ui-ux-pro-max-website/*
 SESSION_HANDOFF.md
+
+cli/playwright-report/
+cli/test-results/
